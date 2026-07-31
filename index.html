@@ -355,7 +355,9 @@ function Home(){
     {key:"EURUSD",label:"EURUSD",sub:"Stats · graphs · log",accent:C.cream},
     {key:"GBPNZD",label:"GBPNZD",sub:"Stats · graphs · log",accent:C.cream},
     {key:"compare",label:"Compare Pairs",sub:"EURUSD vs GBPNZD",accent:C.lossSoft},
-    {key:"balance",label:"Balance",sub:"Equity curve",accent:C.green}
+    {key:"balance",label:"Balance",sub:"Equity curve",accent:C.green},
+    {key:"fees",label:"Fees",sub:"All fees · totals",accent:C.lossSoft},
+    {key:"settings",label:"Settings",sub:"Reset & data controls",accent:C.creamDim}
   ];
   btns.forEach(b=>{
     wrap.append(el("button",{class:"navBtn",style:`border-left:3px solid ${b.accent}`,onclick:()=>nav(b.key)},
@@ -398,17 +400,22 @@ function AddTrade(){
 
   const dateIn=el("input",{type:"date",value:today});
   const plIn=el("input",{type:"number",step:"0.01",placeholder:"e.g. 3.04",inputmode:"decimal"});
+  const tradeNoteIn=el("input",{type:"text",placeholder:"note (optional) e.g. broke rule, revenge trade, good setup"});
 
   wrap.append(panel(
     el("label",{class:"fld"},"Pair"), pairSeg,
     el("label",{class:"fld"},"Outcome"), outSeg,
     el("label",{class:"fld"},"Date"), dateIn,
     el("label",{class:"fld"},"Profit / Loss amount ($)"), plIn,
+    el("label",{class:"fld"},"Note"), tradeNoteIn,
     el("button",{class:"primary",onclick:()=>{
       let amt=parseFloat(plIn.value);
       if(isNaN(amt)){ plIn.style.borderColor=C.red; return; }
       amt=Math.abs(amt); if(outcome==="loss") amt=-amt;
-      state.trades.push({id:nextId(state.trades),pair,date:dateIn.value,pl:+amt.toFixed(2)});
+      state.trades.push({id:nextId(state.trades),pair,date:dateIn.value,pl:+amt.toFixed(2),note:tradeNoteIn.value.trim()});
+      // keep the balance/equity curve in sync with trade results
+      const base=currentBalance();
+      state.balances.push({id:nextId(state.balances),date:dateIn.value,balance:+(base+amt).toFixed(2)});
       save(); nav(pair);
     }},"Save Trade")
   ));
@@ -513,9 +520,12 @@ function PairPage(pair){
   if(!st.ts.length){ logP.append(el("div",{class:"hint"},"No trades yet.")); }
   st.ts.forEach(t=>{
     logP.append(el("div",{class:"row"},
-      el("div",{style:"display:flex;align-items:center;gap:12px"},
-        el("span",{style:`width:8px;height:8px;border-radius:50%;background:${t.pl>=0?C.gold:C.loss}`}),
-        el("span",{class:"mono",style:`font-size:13px;color:${C.cream}`},fmtDate(t.date))
+      el("div",{style:"display:flex;flex-direction:column;gap:2px"},
+        el("div",{style:"display:flex;align-items:center;gap:12px"},
+          el("span",{style:`width:8px;height:8px;border-radius:50%;background:${t.pl>=0?C.gold:C.loss}`}),
+          el("span",{class:"mono",style:`font-size:13px;color:${C.cream}`},fmtDate(t.date))
+        ),
+        t.note?el("span",{class:"mono",style:`font-size:11px;color:${C.creamDim};margin-left:20px`},t.note):null
       ),
       el("div",{style:"display:flex;align-items:center;gap:12px"},
         el("span",{class:"mono",style:`font-size:14px;font-weight:600;color:${sign(t.pl)};min-width:64px;text-align:right`},money(t.pl)),
@@ -585,6 +595,23 @@ function Balance(){
     stat("Growth",growth+"%",sign(end-start))
   )));
 
+  // Reconcile against broker (financing/fees the app never sees will
+  // eventually drift the tracked balance away from the real account —
+  // this snaps it back without messing with trade history)
+  const recIn=el("input",{type:"number",step:"0.01",placeholder:"e.g. 229.07",inputmode:"decimal"});
+  wrap.append(panel(
+    eyebrow("Reconcile Balance"),
+    el("div",{class:"hint",style:"margin-top:0;margin-bottom:12px"},
+      "Broker balance drifted from this tracker (financing, swap, etc.)? Enter the real current balance to sync."),
+    recIn,
+    el("button",{class:"ghost",style:"width:100%",onclick:()=>{
+      const val=parseFloat(recIn.value);
+      if(isNaN(val)){ recIn.style.borderColor=C.red; return; }
+      state.balances.push({id:nextId(state.balances),date:new Date().toISOString().slice(0,10),balance:+val.toFixed(2)});
+      save(); render();
+    }},"Set Current Balance")
+  ));
+
   // Cash in/out summary
   const cf=cashflowTotals();
   wrap.append(panel(
@@ -645,6 +672,124 @@ function Balance(){
 
   return wrap;
 }
+function Fees(){
+  const wrap=el("div",{});
+  wrap.append(pageTitle("Ledger","Fees"));
+
+  const feeItems=state.cashflows.filter(c=>c.kind==="fee").sort((a,b)=>a.date.localeCompare(b.date));
+  const totalFees=feeItems.reduce((s,c)=>s+c.amount,0);
+  const thisMonth=(()=>{
+    const now=new Date(); const ym=now.toISOString().slice(0,7);
+    return feeItems.filter(c=>c.date.startsWith(ym)).reduce((s,c)=>s+c.amount,0);
+  })();
+
+  wrap.append(panel(el("div",{class:"grid2"},
+    stat("Total Fees Paid",money(totalFees),C.red),
+    stat("This Month",money(thisMonth),C.red),
+    stat("Fee Entries",feeItems.length,C.creamDim),
+    stat("Avg per Entry",feeItems.length?money(totalFees/feeItems.length):"$0.00",C.creamDim)
+  )));
+
+  const logP=panel(eyebrow("Fee Log"));
+  if(!feeItems.length) logP.append(el("div",{class:"hint"},"No fees logged yet. Add one from Add Trade → Money In / Out."));
+  feeItems.forEach(c=>{
+    logP.append(el("div",{class:"row"},
+      el("div",{style:"display:flex;flex-direction:column;gap:2px"},
+        el("span",{class:"mono",style:`font-size:13px;color:${C.cream}`},fmtDate(c.date)),
+        c.note?el("span",{class:"mono",style:`font-size:11px;color:${C.creamDim}`},c.note):null
+      ),
+      el("div",{style:"display:flex;gap:12px;align-items:center"},
+        el("span",{class:"mono",style:`font-size:14px;font-weight:600;color:${C.red};min-width:70px;text-align:right`},money(-c.amount)),
+        el("button",{class:"delBtn",onclick:()=>{ state.cashflows=state.cashflows.filter(x=>x.id!==c.id); save(); render(); }},"×")
+      )
+    ));
+  });
+  wrap.append(logP);
+  wrap.append(el("div",{class:"hint"},"Log a fee from Add Trade → Money In / Out → Fee."));
+  return wrap;
+}
+
+function Settings(){
+  const wrap=el("div",{});
+  wrap.append(pageTitle("Data","Settings"));
+
+  wrap.append(panel(
+    eyebrow("Storage"),
+    el("div",{class:"hint",style:"margin-top:0"},
+      state.trades.length+" trades · "+state.balances.length+" balance points · "+state.cashflows.length+" cashflow entries. Stored only on this device.")
+  ));
+
+  // ---- Export: dump full state as JSON so it can be carried to another device ----
+  const exportBox=el("textarea",{readonly:"",rows:"6",style:"width:100%;background:var(--ink);border:1px solid var(--line);border-radius:9px;padding:11px;color:var(--cream);font-family:var(--fMono);font-size:11px;margin-bottom:10px;resize:vertical"});
+  const exportStatus=el("div",{class:"hint",style:"margin-top:0"},"");
+  wrap.append(panel(
+    eyebrow("Export Data"),
+    el("div",{class:"hint",style:"margin-top:0;margin-bottom:12px"},
+      "Copy this to another device's Import box to sync data across phone and desktop. Each device keeps its own separate copy — this is a manual, one-time snapshot, not live sync."),
+    el("button",{class:"ghost",style:"width:100%;margin-bottom:10px",onclick:()=>{
+      exportBox.value=JSON.stringify(state);
+      exportBox.style.display="block";
+      exportBox.select();
+      navigator.clipboard?.writeText(exportBox.value)
+        .then(()=>{ exportStatus.textContent="Copied to clipboard. Paste it into Import on the other device."; })
+        .catch(()=>{ exportStatus.textContent="Couldn't auto-copy — tap the box above, select all, and copy manually."; });
+    }},"Generate & Copy Backup"),
+    exportBox,
+    exportStatus
+  ));
+  exportBox.style.display="none";
+
+  // ---- Import: paste JSON from another device and overwrite local state ----
+  const importBox=el("textarea",{rows:"6",placeholder:"Paste exported data here",style:"width:100%;background:var(--ink);border:1px solid var(--line);border-radius:9px;padding:11px;color:var(--cream);font-family:var(--fMono);font-size:11px;margin-bottom:10px;resize:vertical"});
+  const importStatus=el("div",{class:"hint",style:"margin-top:0"},"");
+  wrap.append(panel(
+    eyebrow("Import Data"),
+    el("div",{class:"hint",style:"margin-top:0;margin-bottom:12px"},
+      "Overwrites everything on THIS device with the pasted backup. Export from here first if you don't want to lose anything."),
+    importBox,
+    el("button",{class:"ghost",style:"width:100%",onclick:()=>{
+      let parsed;
+      try{ parsed=JSON.parse(importBox.value); }
+      catch(e){ importStatus.textContent="That doesn't look like valid backup data."; importStatus.style.color=C.red; return; }
+      if(!parsed || !Array.isArray(parsed.trades) || !Array.isArray(parsed.balances) || !Array.isArray(parsed.cashflows)){
+        importStatus.textContent="Missing trades/balances/cashflows — is this a Desk backup?"; importStatus.style.color=C.red; return;
+      }
+      if(!confirm("Replace all data on this device with the pasted backup? This cannot be undone.")) return;
+      state = {
+        weekStartBalance: typeof parsed.weekStartBalance==="number"?parsed.weekStartBalance:0,
+        cashflows: parsed.cashflows,
+        affirmations: Array.isArray(parsed.affirmations)&&parsed.affirmations.length?parsed.affirmations:state.affirmations,
+        trades: parsed.trades,
+        balances: parsed.balances
+      };
+      save(); nav("home");
+    }},"Import & Overwrite")
+  ));
+
+  const startIn=el("input",{type:"number",step:"0.01",placeholder:"e.g. 229.07",inputmode:"decimal"});
+  wrap.append(panel(
+    eyebrow("Danger Zone"),
+    el("div",{class:"hint",style:`margin-top:0;margin-bottom:12px;color:${C.red}`},
+      "Reset permanently deletes every trade, balance point, and fee/deposit/withdrawal on this device. This cannot be undone."),
+    el("label",{class:"fld"},"New starting balance (optional)"), startIn,
+    el("button",{class:"ghost",style:`width:100%;border-color:${C.red};color:${C.red}`,onclick:()=>{
+      if(!confirm("Delete all trades, balances, and fees on this device? This cannot be undone.")) return;
+      if(!confirm("Really sure? Type OK again to permanently reset The Desk.")) return;
+      const sb=parseFloat(startIn.value);
+      state = {
+        weekStartBalance: isNaN(sb)?0:sb,
+        cashflows: [],
+        affirmations: state.affirmations,
+        trades: [],
+        balances: []
+      };
+      save(); nav("home");
+    }},"Reset App")
+  ));
+
+  return wrap;
+}
+
 function nav(p){ page=p; window.scrollTo(0,0); render(); }
 function render(){
   const app=document.getElementById("app");
@@ -660,6 +805,8 @@ function render(){
     case "GBPNZD": view=PairPage("GBPNZD"); break;
     case "compare": view=Compare(); break;
     case "balance": view=Balance(); break;
+    case "fees": view=Fees(); break;
+    case "settings": view=Settings(); break;
     default: view=Home();
   }
   app.append(view);
