@@ -186,7 +186,14 @@ const SEED = {
 };
 
 /* ---------- state ---------- */
-let state = load();
+/* Only show history from this date on. Older entries are NOT deleted —
+   they're kept aside and saved back untouched, so nothing is lost.
+   Set to "" to show everything again. */
+const SHOW_FROM = "2026-09-30";
+let hidden = {trades:[],balances:[],cashflows:[],weekStartBalance:null};
+let HIDDEN_MAX = 0;
+
+let state = applyShowFrom(load());
 let page = "home";
 let affIdx = Math.floor(Math.random()*state.affirmations.length);
 
@@ -201,10 +208,44 @@ function load(){
   }catch(e){}
   return JSON.parse(JSON.stringify(SEED));
 }
-function save(){
-  try{ localStorage.setItem(STORE_KEY, JSON.stringify(state)); }catch(e){}
+function applyShowFrom(s){
+  if(!SHOW_FROM) return s;
+  const fullBal = s.balances.length ? s.balances[s.balances.length-1].balance : s.weekStartBalance;
+  const keep = x => x.date >= SHOW_FROM;
+  hidden = {
+    trades: s.trades.filter(x=>!keep(x)),
+    balances: s.balances.filter(x=>!keep(x)),
+    cashflows: s.cashflows.filter(x=>!keep(x)),
+    weekStartBalance: s.weekStartBalance
+  };
+  HIDDEN_MAX = Math.max(0, ...[...hidden.trades,...hidden.balances,...hidden.cashflows].map(x=>x.id));
+  const v = {...s,
+    trades: s.trades.filter(keep),
+    balances: s.balances.filter(keep),
+    cashflows: s.cashflows.filter(keep),
+    _view: true
+  };
+  // starting balance = what the account held on SHOW_FROM
+  const tr = v.trades.reduce((a,t)=>a+t.pl,0);
+  const cf = v.cashflows.reduce((a,c)=>a+(c.kind==="adjustment"||c.kind==="deposit"?c.amount:-c.amount),0);
+  v.weekStartBalance = +(fullBal - tr - cf).toFixed(2);
+  return v;
 }
-function nextId(arr){ return arr.length ? Math.max(...arr.map(x=>x.id))+1 : 1; }
+function fullState(){
+  // put the hidden older entries back before saving/exporting
+  if(!state._view) return state;   // after a Reset or Import, save exactly what's there
+  const {_view, ...s} = state;
+  return {...s,
+    weekStartBalance: hidden.weekStartBalance ?? s.weekStartBalance,
+    trades: [...hidden.trades, ...s.trades],
+    balances: [...hidden.balances, ...s.balances],
+    cashflows: [...hidden.cashflows, ...s.cashflows]
+  };
+}
+function save(){
+  try{ localStorage.setItem(STORE_KEY, JSON.stringify(fullState())); }catch(e){}
+}
+function nextId(arr){ return Math.max(HIDDEN_MAX, ...arr.map(x=>x.id), 0)+1; }
 
 /* ---------- helpers ---------- */
 function money(n){ const v=Math.abs(n).toFixed(2); return (n<0?"-$":"$")+v; }
@@ -958,7 +999,7 @@ function Settings(){
     el("div",{class:"hint",style:"margin-top:0;margin-bottom:12px"},
       "Copy this to another device's Import box to sync data across phone and desktop. Each device keeps its own separate copy — this is a manual, one-time snapshot, not live sync."),
     el("button",{class:"ghost",style:"width:100%;margin-bottom:10px",onclick:()=>{
-      exportBox.value=JSON.stringify(state);
+      exportBox.value=JSON.stringify(fullState());
       exportBox.style.display="block";
       exportBox.select();
       navigator.clipboard?.writeText(exportBox.value)
