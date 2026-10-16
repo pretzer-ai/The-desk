@@ -79,8 +79,64 @@ const C = {
   gold:"#E8B44A",goldSoft:"#8A6E2E",loss:"#1E3A8A",lossSoft:"#2B4CA0",
   cream:"#EDE7D6",creamDim:"#9AA3B2",green:"#4ADE80",red:"#F87171"
 };
-const PAIRS = ["EURUSD","GBPNZD"];
+const PAIRS = ["EURUSD","GBPNZD","USDCAD","AUDUSD"];
+const PAIR_COLOR = {EURUSD:C.gold, GBPNZD:C.lossSoft, USDCAD:C.green, AUDUSD:"#C084FC"};
 const STORE_KEY = "the-desk-v1";
+
+/* ---------- combined bot schedule (Pacific time, the bot's own clock) ----------
+   start/end are hours 0-23. If end < start the window runs past midnight.
+   weekdays:true = Mon-Fri only. null window = any time the market is open. */
+const BOT = [
+  {pair:"EURUSD", tag:"Original", strategy:"Buys dips and sells spikes",            window:{start:5, end:9},  weekdays:true},
+  {pair:"GBPNZD", tag:"Original", strategy:"Buys dips and sells spikes",            window:null},
+  {pair:"USDCAD", tag:"New",      strategy:"Joins the trend after a pullback",      window:{start:23,end:9}},
+  {pair:"AUDUSD", tag:"New",      strategy:"Buys dips and sells spikes in quiet hours", window:{start:14,end:22}}
+];
+function botFor(pair){ return BOT.find(b=>b.pair===pair); }
+
+/* Pacific clock, whatever time zone the phone is in */
+function pacificNow(){
+  const p = new Intl.DateTimeFormat("en-US",{timeZone:"America/Vancouver",weekday:"short",hour:"numeric",minute:"numeric",hour12:false}).formatToParts(new Date());
+  const get = t=>p.find(x=>x.type===t).value;
+  const days = {Sun:0,Mon:1,Tue:2,Wed:3,Thu:4,Fri:5,Sat:6};
+  return {day:days[get("weekday")], hour:(+get("hour"))%24, min:+get("minute")};
+}
+/* Forex week: opens Sunday 2pm, closes Friday 2pm Pacific */
+function marketOpen(t){
+  if(t.day===6) return false;
+  if(t.day===0) return t.hour>=14;
+  if(t.day===5) return t.hour<14;
+  return true;
+}
+function inWindow(w,hour){
+  if(!w) return true;
+  return w.start<w.end ? (hour>=w.start && hour<w.end) : (hour>=w.start || hour<w.end);
+}
+function canTradeAt(b,day,hour){
+  const t={day,hour,min:0};
+  if(!marketOpen(t)) return false;
+  if(b.weekdays && (day===0||day===6)) return false;
+  return inWindow(b.window,hour);
+}
+function fmtHour(h){ const ap=h<12?"am":"pm"; const hh=h%12===0?12:h%12; return hh+ap; }
+function windowText(b){
+  if(!b.window) return "Any time the market's open";
+  return fmtHour(b.window.start)+"–"+fmtHour(b.window.end)+(b.weekdays?" weekdays":"");
+}
+/* status now + hours until it changes */
+function botStatus(b){
+  const now=pacificNow();
+  const on=canTradeAt(b,now.day,now.hour);
+  let d=now.day,h=now.hour,hrs=0;
+  for(let i=0;i<24*8;i++){
+    h++; if(h===24){h=0;d=(d+1)%7;}
+    hrs++;
+    if(canTradeAt(b,d,h)!==on) break;
+  }
+  const left = hrs - now.min/60;
+  const lab = left<1 ? Math.max(1,Math.round(left*60))+" min" : (left<24? Math.round(left)+" hr" : Math.round(left/24)+" day"+(Math.round(left/24)>1?"s":""));
+  return {on, text: on ? "Trading window open · closes in "+lab : "Waiting · opens in "+lab};
+}
 
 /* ---------- seed data (first run only) ---------- */
 const SEED = {
@@ -352,11 +408,13 @@ function Home(){
 
   const btns=[
     {key:"add",label:"Add Trade",sub:"Log a new result",accent:C.gold},
+    {key:"schedule",label:"Bot Schedule",sub:(()=>{const n=BOT.filter(b=>botStatus(b).on).length;return n+" of "+BOT.length+" pairs can trade now";})(),accent:C.green},
     {key:"calendar",label:"Daily Calendar",sub:"Win / loss / neutral",accent:C.gold},
-    {key:"EURUSD",label:"EURUSD",sub:"Stats · graphs · log",accent:C.cream},
-    {key:"GBPNZD",label:"GBPNZD",sub:"Stats · graphs · log",accent:C.cream},
-    {key:"compare",label:"Compare Pairs",sub:"EURUSD vs GBPNZD",accent:C.lossSoft},
-    {key:"balance",label:"Balance",sub:"Equity curve",accent:C.green}
+    ...PAIRS.map(p=>({key:p,label:p,sub:botFor(p).strategy,accent:PAIR_COLOR[p]})),
+    {key:"compare",label:"Compare Pairs",sub:"All "+PAIRS.length+" pairs side by side",accent:C.lossSoft},
+    {key:"balance",label:"Balance",sub:"Equity curve",accent:C.green},
+    {key:"fees",label:"Fees",sub:"All fees · totals",accent:C.lossSoft},
+    {key:"settings",label:"Settings",sub:"Reset & data controls",accent:C.creamDim}
   ];
   btns.forEach(b=>{
     wrap.append(el("button",{class:"navBtn",style:`border-left:3px solid ${b.accent}`,onclick:()=>nav(b.key)},
@@ -399,17 +457,22 @@ function AddTrade(){
 
   const dateIn=el("input",{type:"date",value:today});
   const plIn=el("input",{type:"number",step:"0.01",placeholder:"e.g. 3.04",inputmode:"decimal"});
+  const tradeNoteIn=el("input",{type:"text",placeholder:"note (optional) e.g. broke rule, revenge trade, good setup"});
 
   wrap.append(panel(
     el("label",{class:"fld"},"Pair"), pairSeg,
     el("label",{class:"fld"},"Outcome"), outSeg,
     el("label",{class:"fld"},"Date"), dateIn,
     el("label",{class:"fld"},"Profit / Loss amount ($)"), plIn,
+    el("label",{class:"fld"},"Note"), tradeNoteIn,
     el("button",{class:"primary",onclick:()=>{
       let amt=parseFloat(plIn.value);
       if(isNaN(amt)){ plIn.style.borderColor=C.red; return; }
       amt=Math.abs(amt); if(outcome==="loss") amt=-amt;
-      state.trades.push({id:nextId(state.trades),pair,date:dateIn.value,pl:+amt.toFixed(2)});
+      state.trades.push({id:nextId(state.trades),pair,date:dateIn.value,pl:+amt.toFixed(2),note:tradeNoteIn.value.trim()});
+      // keep the balance/equity curve in sync with trade results
+      const base=currentBalance();
+      state.balances.push({id:nextId(state.balances),date:dateIn.value,balance:+(base+amt).toFixed(2)});
       save(); nav(pair);
     }},"Save Trade")
   ));
@@ -519,10 +582,67 @@ function Calendar(){
   return wrap;
 }
 
+function statusPill(b){
+  const s=botStatus(b);
+  return el("div",{style:`display:inline-flex;align-items:center;gap:8px;font-family:var(--fMono);font-size:11px;color:${s.on?C.green:C.creamDim}`},
+    el("span",{style:`width:8px;height:8px;border-radius:50%;background:${s.on?C.green:C.line};${s.on?`box-shadow:0 0 8px ${C.green}`:""}`}),
+    s.text);
+}
+function scheduleCard(b){
+  return panel(
+    el("div",{style:"display:flex;justify-content:space-between;align-items:baseline;margin-bottom:6px"},
+      el("div",{style:"display:flex;align-items:center;gap:10px"},
+        el("span",{class:"chipDot",style:`background:${PAIR_COLOR[b.pair]}`}),
+        el("span",{class:"navLabel",style:"font-size:20px"},b.pair)),
+      el("span",{class:"mono",style:`font-size:10px;letter-spacing:.15em;text-transform:uppercase;color:${b.tag==="New"?C.gold:C.creamDim}`},b.tag)
+    ),
+    el("div",{style:`font-family:var(--fUI);font-size:14px;color:${C.cream};margin-bottom:4px`},b.strategy),
+    el("div",{class:"mono",style:`font-size:12px;color:${C.creamDim};margin-bottom:12px`},windowText(b)),
+    statusPill(b)
+  );
+}
+function hourStrip(b){
+  // 24 little blocks for today's hours (Pacific), lit when the pair can trade
+  const now=pacificNow();
+  const row=el("div",{style:"display:grid;grid-template-columns:repeat(24,1fr);gap:2px;margin-top:4px"});
+  for(let h=0;h<24;h++){
+    const on=canTradeAt(b,now.day,h);
+    row.append(el("div",{title:fmtHour(h),style:`height:14px;border-radius:2px;background:${on?PAIR_COLOR[b.pair]:C.ink};${h===now.hour?`outline:1px solid ${C.cream}`:""}`}));
+  }
+  return row;
+}
+function Schedule(){
+  const wrap=el("div",{});
+  wrap.append(pageTitle("Combined Bot","Bot Schedule"));
+  wrap.append(el("p",{style:`font-family:var(--fUI);font-size:13px;color:${C.creamDim};margin:0 0 20px`},
+    "When each pair is allowed to trade. All times Pacific. The market is closed Friday 2pm to Sunday 2pm."));
+  BOT.forEach(b=>wrap.append(scheduleCard(b)));
+
+  const today=panel(eyebrow("Today, hour by hour"));
+  BOT.forEach(b=>{
+    today.append(el("div",{class:"mono",style:`font-size:11px;color:${C.cream};margin-top:10px`},b.pair));
+    today.append(hourStrip(b));
+  });
+  today.append(el("div",{class:"mono",style:`display:flex;justify-content:space-between;font-size:9px;color:${C.creamDim};margin-top:6px`},
+    el("span",{},"12am"),el("span",{},"6am"),el("span",{},"12pm"),el("span",{},"6pm"),el("span",{},"11pm")));
+  today.append(el("div",{class:"hint"},"Outlined block = this hour."));
+  wrap.append(today);
+  return wrap;
+}
+
 function PairPage(pair){
   const wrap=el("div",{});
   wrap.append(pageTitle("Pair",pair));
   const st=pairStats(pair);
+  const b=botFor(pair);
+  if(b){
+    wrap.append(panel(
+      eyebrow("Bot · "+b.tag+" strategy"),
+      el("div",{style:`font-family:var(--fUI);font-size:14px;color:${C.cream};margin-bottom:4px`},b.strategy),
+      el("div",{class:"mono",style:`font-size:12px;color:${C.creamDim};margin-bottom:12px`},windowText(b)+" (Pacific)"),
+      statusPill(b)
+    ));
+  }
 
   wrap.append(panel(
     el("div",{class:"grid2"},
@@ -552,9 +672,12 @@ function PairPage(pair){
   if(!st.ts.length){ logP.append(el("div",{class:"hint"},"No trades yet.")); }
   st.ts.forEach(t=>{
     logP.append(el("div",{class:"row"},
-      el("div",{style:"display:flex;align-items:center;gap:12px"},
-        el("span",{style:`width:8px;height:8px;border-radius:50%;background:${t.pl>=0?C.gold:C.loss}`}),
-        el("span",{class:"mono",style:`font-size:13px;color:${C.cream}`},fmtDate(t.date))
+      el("div",{style:"display:flex;flex-direction:column;gap:2px"},
+        el("div",{style:"display:flex;align-items:center;gap:12px"},
+          el("span",{style:`width:8px;height:8px;border-radius:50%;background:${t.pl>=0?C.gold:C.loss}`}),
+          el("span",{class:"mono",style:`font-size:13px;color:${C.cream}`},fmtDate(t.date))
+        ),
+        t.note?el("span",{class:"mono",style:`font-size:11px;color:${C.creamDim};margin-left:20px`},t.note):null
       ),
       el("div",{style:"display:flex;align-items:center;gap:12px"},
         el("span",{class:"mono",style:`font-size:14px;font-weight:600;color:${sign(t.pl)};min-width:64px;text-align:right`},money(t.pl)),
@@ -571,38 +694,39 @@ function PairPage(pair){
 function Compare(){
   const wrap=el("div",{});
   wrap.append(pageTitle("Head to Head","Compare"));
-  const A="EURUSD",B="GBPNZD";
-  const sa=pairStats(A), sb=pairStats(B);
+  const all=PAIRS.map(p=>({p,color:PAIR_COLOR[p],st:pairStats(p)}));
 
-  wrap.append(el("div",{style:"display:flex;gap:12px;margin-bottom:18px"},
-    chip(C.gold,A), chip(C.lossSoft,B)));
+  wrap.append(el("div",{style:"display:flex;gap:10px;flex-wrap:wrap;margin-bottom:18px"},
+    all.map(a=>chip(a.color,a.p))));
 
-  wrap.append(panel(el("div",{class:"grid2"},
-    stat(A+" P/L",money(sa.totalPL),C.gold),
-    stat(B+" P/L",money(sb.totalPL),C.lossSoft),
-    stat(A+" Win %",sa.winRate+"%",C.gold),
-    stat(B+" Win %",sb.winRate+"%",C.lossSoft)
-  )));
+  const tbl=panel(eyebrow("Totals"));
+  all.forEach(a=>{
+    tbl.append(el("div",{class:"row"},
+      el("div",{style:"display:flex;align-items:center;gap:10px"},
+        el("span",{class:"chipDot",style:`background:${a.color}`}),
+        el("span",{class:"mono",style:`font-size:13px;color:${C.cream}`},a.p)),
+      el("div",{style:"display:flex;gap:16px;align-items:center"},
+        el("span",{class:"mono",style:`font-size:12px;color:${C.creamDim}`},a.st.ts.length+" trades · "+a.st.winRate+"%"),
+        el("span",{class:"mono",style:`font-size:14px;font-weight:600;color:${sign(a.st.totalPL)};min-width:64px;text-align:right`},money(a.st.totalPL)))
+    ));
+  });
+  wrap.append(tbl);
 
-  // grouped metric bars
   const metrics=[
-    {label:"P/L",values:[{v:+sa.totalPL.toFixed(2),color:C.gold},{v:+sb.totalPL.toFixed(2),color:C.lossSoft}]},
-    {label:"Wins",values:[{v:sa.wins,color:C.gold},{v:sb.wins,color:C.lossSoft}]},
-    {label:"Losses",values:[{v:sa.losses,color:C.gold},{v:sb.losses,color:C.lossSoft}]},
-    {label:"Win%",values:[{v:sa.winRate,color:C.gold},{v:sb.winRate,color:C.lossSoft}]}
+    {label:"P/L",values:all.map(a=>({v:+a.st.totalPL.toFixed(2),color:a.color}))},
+    {label:"Wins",values:all.map(a=>({v:a.st.wins,color:a.color}))},
+    {label:"Losses",values:all.map(a=>({v:a.st.losses,color:a.color}))},
+    {label:"Win%",values:all.map(a=>({v:a.st.winRate,color:a.color}))}
   ];
   const mP=panel(eyebrow("Metrics Side by Side"));
   mP.append(svgBars(metrics)); wrap.append(mP);
 
-  // merged cumulative
   const cum=ts=>{let r=0;return ts.map(t=>(r+=t.pl,+r.toFixed(2)));};
-  const ca=cum(sa.ts), cb=cum(sb.ts);
-  const maxLen=Math.max(ca.length,cb.length);
-  const ptsA=Array.from({length:maxLen},(_,i)=>({x:i,y:ca[i]??null}));
-  const ptsB=Array.from({length:maxLen},(_,i)=>({x:i,y:cb[i]??null}));
+  const cs=all.map(a=>cum(a.st.ts));
+  const maxLen=Math.max(1,...cs.map(c=>c.length));
   const cP=panel(eyebrow("Cumulative P/L by Trade"));
   cP.append(svgLine(
-    [{name:A,color:C.gold,points:ptsA},{name:B,color:C.lossSoft,points:ptsB}],
+    all.map((a,i)=>({name:a.p,color:a.color,points:Array.from({length:maxLen},(_,j)=>({x:j,y:cs[i][j]??null}))})),
     {xLabels:Array.from({length:maxLen},(_,i)=>"#"+(i+1))}
   ));
   cP.append(el("div",{class:"hint"},"Aligned by trade number, not date."));
@@ -615,14 +739,38 @@ function Balance(){
   wrap.append(pageTitle("Equity","Balance"));
   const start=state.weekStartBalance;
   const end=currentBalance();
-  const growth=start? (((end-start)/start)*100).toFixed(1):"0";
+  // Profit comes from trades only. Deposits/withdrawals move the balance
+  // but are your own money, not profit, so they're kept out of these numbers.
+  const tradePL=state.trades.reduce((s,t)=>s+t.pl,0);
+  const cfx=cashflowTotals();
+  const putIn=start+cfx.deposits-cfx.withdrawals;
+  const growth=putIn>0? ((tradePL/putIn)*100).toFixed(1):"0";
 
   wrap.append(panel(el("div",{class:"grid2"},
     stat("Week Start",money(start),C.creamDim),
     stat("Current",money(end),C.cream),
-    stat("Net Change",money(end-start),sign(end-start)),
-    stat("Growth",growth+"%",sign(end-start))
+    stat("Trading P/L",money(tradePL),sign(tradePL)),
+    stat("Growth",growth+"%",sign(tradePL))
   )));
+  wrap.append(el("div",{class:"hint",style:"margin-top:-6px;margin-bottom:14px"},
+    "Trading P/L counts trades only. Deposits and withdrawals change your balance but aren't profit."));
+
+  // Reconcile against broker (financing/fees the app never sees will
+  // eventually drift the tracked balance away from the real account —
+  // this snaps it back without messing with trade history)
+  const recIn=el("input",{type:"number",step:"0.01",placeholder:"e.g. 229.07",inputmode:"decimal"});
+  wrap.append(panel(
+    eyebrow("Reconcile Balance"),
+    el("div",{class:"hint",style:"margin-top:0;margin-bottom:12px"},
+      "Broker balance drifted from this tracker (financing, swap, etc.)? Enter the real current balance to sync."),
+    recIn,
+    el("button",{class:"ghost",style:"width:100%",onclick:()=>{
+      const val=parseFloat(recIn.value);
+      if(isNaN(val)){ recIn.style.borderColor=C.red; return; }
+      state.balances.push({id:nextId(state.balances),date:new Date().toISOString().slice(0,10),balance:+val.toFixed(2)});
+      save(); render();
+    }},"Set Current Balance")
+  ));
 
   // Cash in/out summary
   const cf=cashflowTotals();
@@ -686,6 +834,124 @@ function Balance(){
 
   return wrap;
 }
+function Fees(){
+  const wrap=el("div",{});
+  wrap.append(pageTitle("Ledger","Fees"));
+
+  const feeItems=state.cashflows.filter(c=>c.kind==="fee").sort((a,b)=>a.date.localeCompare(b.date));
+  const totalFees=feeItems.reduce((s,c)=>s+c.amount,0);
+  const thisMonth=(()=>{
+    const now=new Date(); const ym=now.toISOString().slice(0,7);
+    return feeItems.filter(c=>c.date.startsWith(ym)).reduce((s,c)=>s+c.amount,0);
+  })();
+
+  wrap.append(panel(el("div",{class:"grid2"},
+    stat("Total Fees Paid",money(totalFees),C.red),
+    stat("This Month",money(thisMonth),C.red),
+    stat("Fee Entries",feeItems.length,C.creamDim),
+    stat("Avg per Entry",feeItems.length?money(totalFees/feeItems.length):"$0.00",C.creamDim)
+  )));
+
+  const logP=panel(eyebrow("Fee Log"));
+  if(!feeItems.length) logP.append(el("div",{class:"hint"},"No fees logged yet. Add one from Add Trade → Money In / Out."));
+  feeItems.forEach(c=>{
+    logP.append(el("div",{class:"row"},
+      el("div",{style:"display:flex;flex-direction:column;gap:2px"},
+        el("span",{class:"mono",style:`font-size:13px;color:${C.cream}`},fmtDate(c.date)),
+        c.note?el("span",{class:"mono",style:`font-size:11px;color:${C.creamDim}`},c.note):null
+      ),
+      el("div",{style:"display:flex;gap:12px;align-items:center"},
+        el("span",{class:"mono",style:`font-size:14px;font-weight:600;color:${C.red};min-width:70px;text-align:right`},money(-c.amount)),
+        el("button",{class:"delBtn",onclick:()=>{ state.cashflows=state.cashflows.filter(x=>x.id!==c.id); save(); render(); }},"×")
+      )
+    ));
+  });
+  wrap.append(logP);
+  wrap.append(el("div",{class:"hint"},"Log a fee from Add Trade → Money In / Out → Fee."));
+  return wrap;
+}
+
+function Settings(){
+  const wrap=el("div",{});
+  wrap.append(pageTitle("Data","Settings"));
+
+  wrap.append(panel(
+    eyebrow("Storage"),
+    el("div",{class:"hint",style:"margin-top:0"},
+      state.trades.length+" trades · "+state.balances.length+" balance points · "+state.cashflows.length+" cashflow entries. Stored only on this device.")
+  ));
+
+  // ---- Export: dump full state as JSON so it can be carried to another device ----
+  const exportBox=el("textarea",{readonly:"",rows:"6",style:"width:100%;background:var(--ink);border:1px solid var(--line);border-radius:9px;padding:11px;color:var(--cream);font-family:var(--fMono);font-size:11px;margin-bottom:10px;resize:vertical"});
+  const exportStatus=el("div",{class:"hint",style:"margin-top:0"},"");
+  wrap.append(panel(
+    eyebrow("Export Data"),
+    el("div",{class:"hint",style:"margin-top:0;margin-bottom:12px"},
+      "Copy this to another device's Import box to sync data across phone and desktop. Each device keeps its own separate copy — this is a manual, one-time snapshot, not live sync."),
+    el("button",{class:"ghost",style:"width:100%;margin-bottom:10px",onclick:()=>{
+      exportBox.value=JSON.stringify(state);
+      exportBox.style.display="block";
+      exportBox.select();
+      navigator.clipboard?.writeText(exportBox.value)
+        .then(()=>{ exportStatus.textContent="Copied to clipboard. Paste it into Import on the other device."; })
+        .catch(()=>{ exportStatus.textContent="Couldn't auto-copy — tap the box above, select all, and copy manually."; });
+    }},"Generate & Copy Backup"),
+    exportBox,
+    exportStatus
+  ));
+  exportBox.style.display="none";
+
+  // ---- Import: paste JSON from another device and overwrite local state ----
+  const importBox=el("textarea",{rows:"6",placeholder:"Paste exported data here",style:"width:100%;background:var(--ink);border:1px solid var(--line);border-radius:9px;padding:11px;color:var(--cream);font-family:var(--fMono);font-size:11px;margin-bottom:10px;resize:vertical"});
+  const importStatus=el("div",{class:"hint",style:"margin-top:0"},"");
+  wrap.append(panel(
+    eyebrow("Import Data"),
+    el("div",{class:"hint",style:"margin-top:0;margin-bottom:12px"},
+      "Overwrites everything on THIS device with the pasted backup. Export from here first if you don't want to lose anything."),
+    importBox,
+    el("button",{class:"ghost",style:"width:100%",onclick:()=>{
+      let parsed;
+      try{ parsed=JSON.parse(importBox.value); }
+      catch(e){ importStatus.textContent="That doesn't look like valid backup data."; importStatus.style.color=C.red; return; }
+      if(!parsed || !Array.isArray(parsed.trades) || !Array.isArray(parsed.balances) || !Array.isArray(parsed.cashflows)){
+        importStatus.textContent="Missing trades/balances/cashflows — is this a Desk backup?"; importStatus.style.color=C.red; return;
+      }
+      if(!confirm("Replace all data on this device with the pasted backup? This cannot be undone.")) return;
+      state = {
+        weekStartBalance: typeof parsed.weekStartBalance==="number"?parsed.weekStartBalance:0,
+        cashflows: parsed.cashflows,
+        affirmations: Array.isArray(parsed.affirmations)&&parsed.affirmations.length?parsed.affirmations:state.affirmations,
+        trades: parsed.trades,
+        balances: parsed.balances
+      };
+      save(); nav("home");
+    }},"Import & Overwrite")
+  ));
+
+  const startIn=el("input",{type:"number",step:"0.01",placeholder:"e.g. 229.07",inputmode:"decimal"});
+  wrap.append(panel(
+    eyebrow("Danger Zone"),
+    el("div",{class:"hint",style:`margin-top:0;margin-bottom:12px;color:${C.red}`},
+      "Reset permanently deletes every trade, balance point, and fee/deposit/withdrawal on this device. This cannot be undone."),
+    el("label",{class:"fld"},"New starting balance (optional)"), startIn,
+    el("button",{class:"ghost",style:`width:100%;border-color:${C.red};color:${C.red}`,onclick:()=>{
+      if(!confirm("Delete all trades, balances, and fees on this device? This cannot be undone.")) return;
+      if(!confirm("Really sure? Type OK again to permanently reset The Desk.")) return;
+      const sb=parseFloat(startIn.value);
+      state = {
+        weekStartBalance: isNaN(sb)?0:sb,
+        cashflows: [],
+        affirmations: state.affirmations,
+        trades: [],
+        balances: []
+      };
+      save(); nav("home");
+    }},"Reset App")
+  ));
+
+  return wrap;
+}
+
 function nav(p){ page=p; window.scrollTo(0,0); render(); }
 function render(){
   const app=document.getElementById("app");
@@ -697,11 +963,12 @@ function render(){
   switch(page){
     case "add": view=AddTrade(); break;
     case "calendar": view=Calendar(); break;
-    case "EURUSD": view=PairPage("EURUSD"); break;
-    case "GBPNZD": view=PairPage("GBPNZD"); break;
+    case "schedule": view=Schedule(); break;
     case "compare": view=Compare(); break;
     case "balance": view=Balance(); break;
-    default: view=Home();
+    case "fees": view=Fees(); break;
+    case "settings": view=Settings(); break;
+    default: view=PAIRS.includes(page)?PairPage(page):Home();
   }
   app.append(view);
 }
