@@ -412,6 +412,7 @@ function Home(){
     {key:"calendar",label:"Daily Calendar",sub:"Win / loss / neutral",accent:C.gold},
     ...PAIRS.map(p=>({key:p,label:p,sub:botFor(p).strategy,accent:PAIR_COLOR[p]})),
     {key:"compare",label:"Compare Pairs",sub:"All "+PAIRS.length+" pairs side by side",accent:C.lossSoft},
+    {key:"weekly",label:"Weekly P/L",sub:"Up or down, week by week",accent:C.gold},
     {key:"balance",label:"Balance",sub:"Equity curve",accent:C.green},
     {key:"fees",label:"Fees",sub:"All fees · totals",accent:C.lossSoft},
     {key:"settings",label:"Settings",sub:"Reset & data controls",accent:C.creamDim}
@@ -734,6 +735,69 @@ function Compare(){
   return wrap;
 }
 
+function weekStart(iso){
+  // Monday of the week containing this date, as "YYYY-MM-DD"
+  const d=new Date(iso+"T00:00:00"); const dow=(d.getDay()+6)%7;
+  d.setDate(d.getDate()-dow);
+  return d.getFullYear()+"-"+String(d.getMonth()+1).padStart(2,"0")+"-"+String(d.getDate()).padStart(2,"0");
+}
+function shortDate(iso){ const d=new Date(iso+"T00:00:00"); return d.toLocaleDateString("en-US",{month:"short",day:"numeric"}); }
+function weeklyRows(){
+  const m={};
+  state.trades.forEach(t=>{
+    const k=weekStart(t.date);
+    const w=m[k]||(m[k]={start:k,pl:0,n:0,wins:0,losses:0});
+    w.pl+=t.pl; w.n++; if(t.pl>0) w.wins++; else if(t.pl<0) w.losses++;
+  });
+  return Object.values(m).sort((a,b)=>a.start.localeCompare(b.start)).map(w=>{
+    const e=new Date(w.start+"T00:00:00"); e.setDate(e.getDate()+6);
+    const end=e.getFullYear()+"-"+String(e.getMonth()+1).padStart(2,"0")+"-"+String(e.getDate()).padStart(2,"0");
+    return {...w,pl:+w.pl.toFixed(2),end};
+  });
+}
+function Weekly(){
+  const wrap=el("div",{});
+  wrap.append(pageTitle("Week by Week","Weekly P/L"));
+  const weeks=weeklyRows();
+  if(!weeks.length){
+    wrap.append(panel(el("div",{class:"hint",style:"margin-top:0"},"No trades yet. Weekly results will show up here once you log some.")));
+    return wrap;
+  }
+  const up=weeks.filter(w=>w.pl>0).length, down=weeks.filter(w=>w.pl<0).length;
+  const best=weeks.reduce((a,b)=>b.pl>a.pl?b:a), worst=weeks.reduce((a,b)=>b.pl<a.pl?b:a);
+  const thisWk=weeks.find(w=>w.start===weekStart(new Date().toLocaleDateString("en-CA")));
+  wrap.append(panel(el("div",{class:"grid2"},
+    stat("This Week",thisWk?money(thisWk.pl):"$0.00",thisWk?sign(thisWk.pl):C.creamDim),
+    stat("Up / Down Weeks",up+" / "+down,C.cream),
+    stat("Best Week",money(best.pl),sign(best.pl)),
+    stat("Worst Week",money(worst.pl),sign(worst.pl))
+  )));
+
+  const recent=weeks.slice(-12);
+  const chP=panel(eyebrow("Week over Week"));
+  chP.append(svgBars(recent.map(w=>({label:shortDate(w.start),values:[{v:w.pl,color:sign(w.pl)}]}))));
+  chP.append(el("div",{class:"hint"},"Green weeks made money, red weeks lost. Weeks run Monday to Sunday."+(weeks.length>12?" Showing the last 12.":"")));
+  wrap.append(chP);
+
+  const logP=panel(eyebrow("Every Week"));
+  weeks.slice().reverse().forEach((w,i,arr)=>{
+    const prev=arr[i+1];
+    const chg=prev? w.pl-prev.pl : null;
+    logP.append(el("div",{class:"row"},
+      el("div",{style:"display:flex;flex-direction:column;gap:2px"},
+        el("span",{class:"mono",style:`font-size:13px;color:${C.cream}`},shortDate(w.start)+" – "+shortDate(w.end)),
+        el("span",{class:"mono",style:`font-size:11px;color:${C.creamDim}`},
+          w.n+" trade"+(w.n===1?"":"s")+" · "+w.wins+"W "+w.losses+"L"+(chg===null?"":" · "+(chg>=0?"▲ ":"▼ ")+money(Math.abs(chg))+" vs week before")
+        )
+      ),
+      el("span",{class:"mono",style:`font-size:15px;font-weight:600;color:${sign(w.pl)};min-width:74px;text-align:right`},money(w.pl))
+    ));
+  });
+  wrap.append(logP);
+  wrap.append(el("div",{class:"hint"},"Trades only. Deposits, withdrawals and fees aren't counted."));
+  return wrap;
+}
+
 function Balance(){
   const wrap=el("div",{});
   wrap.append(pageTitle("Equity","Balance"));
@@ -966,6 +1030,7 @@ function render(){
     case "schedule": view=Schedule(); break;
     case "compare": view=Compare(); break;
     case "balance": view=Balance(); break;
+    case "weekly": view=Weekly(); break;
     case "fees": view=Fees(); break;
     case "settings": view=Settings(); break;
     default: view=PAIRS.includes(page)?PairPage(page):Home();
