@@ -407,13 +407,13 @@ function Home(){
   wrap.append(snap);
 
   const btns=[
-    {key:"add",label:"Add Trade",sub:"Log a new result",accent:C.gold},
-    {key:"schedule",label:"Bot Schedule",sub:(()=>{const n=BOT.filter(b=>botStatus(b).on).length;return n+" of "+BOT.length+" pairs can trade now";})(),accent:C.green},
-    {key:"calendar",label:"Daily Calendar",sub:"Win / loss / neutral",accent:C.gold},
+    {key:"add",label:"Add Trade",sub:"Log a new result",accent:C.red},
     ...PAIRS.map(p=>({key:p,label:p,sub:botFor(p).strategy,accent:PAIR_COLOR[p]})),
     {key:"compare",label:"Compare Pairs",sub:"All "+PAIRS.length+" pairs side by side",accent:C.lossSoft},
     {key:"weekly",label:"Weekly P/L",sub:"Up or down, week by week",accent:C.gold},
-    {key:"balance",label:"Balance",sub:"Equity curve",accent:C.green},
+    {key:"calendar",label:"Daily Calendar",sub:"Win / loss / neutral",accent:C.cream},
+    {key:"schedule",label:"Bot Schedule",sub:(()=>{const n=BOT.filter(b=>botStatus(b).on).length;return n+" of "+BOT.length+" pairs can trade now";})(),accent:C.green},
+    {key:"balance",label:"Balance",sub:"Equity curve",accent:C.gold},
     {key:"fees",label:"Fees",sub:"All fees · totals",accent:C.lossSoft},
     {key:"settings",label:"Settings",sub:"Reset & data controls",accent:C.creamDim}
   ];
@@ -801,8 +801,13 @@ function Weekly(){
 function Balance(){
   const wrap=el("div",{});
   wrap.append(pageTitle("Equity","Balance"));
-  const start=state.weekStartBalance;
+  const start=state.weekStartBalance;   // original starting money (used for Growth %)
   const end=currentBalance();
+  const monday=weekStart(new Date().toLocaleDateString("en-CA"));
+  const wkTrades=state.trades.filter(t=>t.date>=monday).reduce((s,t)=>s+t.pl,0);
+  const wkCash=state.cashflows.filter(c=>c.date>=monday).reduce((s,c)=>
+    s+(c.kind==="adjustment"?c.amount : c.kind==="deposit"?c.amount : -c.amount),0);
+  const weekOpen=+(end-wkTrades-wkCash).toFixed(2);
   // Profit comes from trades only. Deposits/withdrawals move the balance
   // but are your own money, not profit, so they're kept out of these numbers.
   const tradePL=state.trades.reduce((s,t)=>s+t.pl,0);
@@ -811,7 +816,7 @@ function Balance(){
   const growth=putIn>0? ((tradePL/putIn)*100).toFixed(1):"0";
 
   wrap.append(panel(el("div",{class:"grid2"},
-    stat("Week Start",money(start),C.creamDim),
+    stat("Week Start",money(weekOpen),C.creamDim),
     stat("Current",money(end),C.cream),
     stat("Trading P/L",money(tradePL),sign(tradePL)),
     stat("Growth",growth+"%",sign(tradePL))
@@ -852,9 +857,9 @@ function Balance(){
   const pts=state.balances.map((b,i)=>({x:i,y:b.balance}));
   const eqP=panel(eyebrow("Equity Curve"));
   eqP.append(pts.length?svgLine([{name:"Balance",color:C.green,points:pts}],{
-    refY:start, xLabels:state.balances.map((_,i)=>String(i+1))
+    refY:weekOpen, xLabels:state.balances.map((_,i)=>String(i+1))
   }):el("div",{class:"hint"},"No balance points yet."));
-  eqP.append(el("div",{class:"hint",style:`color:${C.goldSoft}`},"Dashed line = week-start balance ("+money(start)+")"));
+  eqP.append(el("div",{class:"hint",style:`color:${C.goldSoft}`},"Dashed line = this week's starting balance ("+money(weekOpen)+", Monday)"));
   wrap.append(eqP);
 
   const logP=panel(eyebrow("Balance Log"));
